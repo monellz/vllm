@@ -27,6 +27,7 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
 from vllm.attention.ops.triton_decode_attention import decode_attention_fwd
+from vllm.attention.ops.triton_mla import mla_decode
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 if TYPE_CHECKING:
@@ -708,39 +709,60 @@ class TritonMLAImpl(MLACommonImpl[TritonMLAMetadata]):
 
         decode_meta = attn_metadata.decode_metadata
         assert decode_meta is not None
+
+        # New code
         B = q_nope.shape[0]
-
-        q = torch.cat([q_nope, q_pe], dim=-1)
-        o = torch.zeros(B,
-                        self.num_heads,
-                        self.kv_lora_rank,
-                        dtype=q.dtype,
-                        device=q.device)
-
-        # TODO(lucas) Allocate ahead of time
+        o = torch.empty(B, self.num_heads, self.kv_lora_rank, dtype=q_nope.dtype, device=q_nope.device)
         attn_logits = torch.empty(
             (
                 B,
                 self.num_heads,
                 attn_metadata.num_kv_splits,
-                # NOTE(lucas) idk why the +1 is here but sglang has it so we
-                # just mirror that
                 self.kv_lora_rank + 1,
             ),
             dtype=torch.float32,
-            device=q.device,
+            device=q_nope.device,
         )
-
-        # Add a head dim of 1
-        kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.unsqueeze(2)
-        kv_c_cache = kv_c_and_k_pe_cache[..., :self.kv_lora_rank]
         PAGE_SIZE = kv_c_and_k_pe_cache.size(1)
-
-        # Run MQA
-        decode_attention_fwd(q, kv_c_and_k_pe_cache, kv_c_cache, o,
-                             decode_meta.block_tables,
-                             decode_meta.seq_lens_tensor, attn_logits,
-                             attn_metadata.num_kv_splits, self.scale,
-                             PAGE_SIZE)
-
+        kv_c_cache = kv_c_and_k_pe_cache[..., :self.kv_lora_rank]
+        k_pe_cache = kv_c_and_k_pe_cache[..., self.kv_lora_rank:]
+        mla_decode(q_nope, q_pe, kv_c_cache, k_pe_cache, o, decode_meta.block_tables, decode_meta.seq_lens_tensor, attn_logits, attn_metadata.num_kv_splits, self.scale, PAGE_SIZE)
         return self._v_up_proj_and_o_proj(o)
+
+        # Previous code
+        # B = q_nope.shape[0]
+
+        # q = torch.cat([q_nope, q_pe], dim=-1)
+        # o = torch.zeros(B,
+        #                 self.num_heads,
+        #                 self.kv_lora_rank,
+        #                 dtype=q.dtype,
+        #                 device=q.device)
+
+        # # TODO(lucas) Allocate ahead of time
+        # attn_logits = torch.empty(
+        #     (
+        #         B,
+        #         self.num_heads,
+        #         attn_metadata.num_kv_splits,
+        #         # NOTE(lucas) idk why the +1 is here but sglang has it so we
+        #         # just mirror that
+        #         self.kv_lora_rank + 1,
+        #     ),
+        #     dtype=torch.float32,
+        #     device=q.device,
+        # )
+
+        # # Add a head dim of 1
+        # kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.unsqueeze(2)
+        # kv_c_cache = kv_c_and_k_pe_cache[..., :self.kv_lora_rank]
+        # PAGE_SIZE = kv_c_and_k_pe_cache.size(1)
+
+        # # Run MQA
+        # decode_attention_fwd(q, kv_c_and_k_pe_cache, kv_c_cache, o,
+        #                      decode_meta.block_tables,
+        #                      decode_meta.seq_lens_tensor, attn_logits,
+        #                      attn_metadata.num_kv_splits, self.scale,
+        #                      PAGE_SIZE)
+
+        # return self._v_up_proj_and_o_proj(o)
