@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
-import dataclasses
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -17,6 +16,7 @@ except ImportError:
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
 
 import torch
+
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata,
@@ -26,10 +26,8 @@ from vllm.attention.backends.mla.utils import MLACommonImpl, MLACommonMetadata
 from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
-
 from vllm.utils import (async_tensor_h2d, get_kv_cache_torch_dtype,
                         make_tensor_with_pad)
-
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -41,11 +39,11 @@ class FlashInferMLABackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "FLASHINFER_MLA"
-    
+
     @staticmethod
     def get_impl_cls() -> Type["FlashInferMLAImpl"]:
         return FlashInferMLAImpl
-    
+
     @staticmethod
     def get_metadata_cls() -> Type["AttentionMetadata"]:
         return FlashInferMLAMetadata
@@ -53,11 +51,11 @@ class FlashInferMLABackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> Type["FlashInferMLAMetadataBuilder"]:
         return FlashInferMLAMetadataBuilder
-    
+
     @staticmethod
     def get_state_cls() -> Type["FlashInferMLAState"]:
         return FlashInferMLAState
-    
+
     @staticmethod
     def get_kv_cache_shape(
         num_blocks: int,
@@ -104,7 +102,7 @@ class FlashInferMLAState(AttentionState):
         self._workspace_buffer = None
         self._decode_wrapper = None
         self._prefill_wrapper = None
-    
+
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
             self._workspace_buffer = torch.empty(
@@ -112,19 +110,19 @@ class FlashInferMLAState(AttentionState):
                 dtype=torch.uint8,
                 device=self.runner.device)
         return self._workspace_buffer
-    
+
     def _get_prefill_wrapper(self):
         if self._prefill_wrapper is None:
             self._prefill_wrapper = BatchMLAPagedAttentionWrapper(
                 self._get_workspace_buffer(), backend="fa2")
         return self._prefill_wrapper
-    
+
     def _get_decode_wrapper(self):
         if self._decode_wrapper is None:
             self._decode_wrapper = BatchMLAPagedAttentionWrapper(
                 self._get_workspace_buffer(), backend="fa2")
         return self._decode_wrapper
-    
+
     @contextmanager
     def graph_capture(self, max_batch_size: int):
         self._is_graph_capturing = True
@@ -137,9 +135,7 @@ class FlashInferMLAState(AttentionState):
             self.runner.graph_block_tables).to(device=self.runner.device)
         self._graph_decode_workspace_buffer = self._get_workspace_buffer()
         self._graph_query_start_loc_buffer = torch.empty(
-            max_batch_size + 1,
-            dtype=torch.int32,
-            device=self.runner.device)
+            max_batch_size + 1, dtype=torch.int32, device=self.runner.device)
         self._graph_indices_buffer = torch.empty(
             max_batch_size * self.runner.cache_config.num_gpu_blocks,
             dtype=torch.int32,
@@ -149,11 +145,12 @@ class FlashInferMLAState(AttentionState):
                                                 device=self.runner.device)
         self._graph_last_page_len_buffer = torch.empty(
             max_batch_size, dtype=torch.int32, device=self.runner.device)
-        self._graph_seq_lens_buffer = torch.empty(
-            max_batch_size, dtype=torch.int32, device=self.runner.device)
+        self._graph_seq_lens_buffer = torch.empty(max_batch_size,
+                                                  dtype=torch.int32,
+                                                  device=self.runner.device)
         self._graph_input_positions = torch.zeros((max_batch_size, ),
-                                      dtype=torch.long,
-                                      device=self.runner.device)
+                                                  dtype=torch.long,
+                                                  device=self.runner.device)
         yield
         self._is_graph_capturing = False
         del self._graph_slot_mapping
@@ -178,7 +175,9 @@ class FlashInferMLAState(AttentionState):
     def graph_capture_get_metadata_for_batch(
             self, batch_size: int, is_encoder_decoder_model: bool = False):
         assert self._is_graph_capturing
-        _query_start_loc_indptr = self._graph_query_start_loc_buffer[:batch_size + 1]
+        _query_start_loc_indptr = self._graph_query_start_loc_buffer[:
+                                                                     batch_size
+                                                                     + 1]
         _indptr_buffer = self._graph_indptr_buffer[:batch_size + 1]
         _last_page_len_buffer = self._graph_last_page_len_buffer[:batch_size]
         _seq_lens_buffer = self._graph_seq_lens_buffer[:batch_size]
@@ -209,15 +208,16 @@ class FlashInferMLAState(AttentionState):
                                                         self.runner.block_size,
                                                         dtype=torch.int32)
         seq_lens_tensor_host = torch.full((batch_size, ),
-                                                        self.runner.block_size,
-                                                        dtype=torch.int32)
+                                          self.runner.block_size,
+                                          dtype=torch.int32)
         query_start_loc_host = torch.arange(0,
                                             batch_size + 1,
                                             dtype=torch.int32)
 
         # TODO remove hard code
         assert self.runner.model_config.is_deepseek_mla
-        num_heads = self.runner.model_config.get_num_attention_heads(self.runner.parallel_config)
+        num_heads = self.runner.model_config.get_num_attention_heads(
+            self.runner.parallel_config)
         qk_nope_head_dim = self.runner.model_config.hf_text_config.qk_nope_head_dim
         qk_rope_head_dim = self.runner.model_config.hf_text_config.qk_rope_head_dim
         head_dim_ckv = self.runner.model_config.hf_text_config.kv_lora_rank
@@ -261,7 +261,7 @@ class FlashInferMLAState(AttentionState):
         )
         attn_metadata.begin_forward()
         return attn_metadata
-    
+
     def get_graph_input_buffers(self,
                                 attn_metadata,
                                 is_encoder_decoder_model: bool = False):
@@ -280,7 +280,7 @@ class FlashInferMLAState(AttentionState):
         num_positions = input_positions.shape[0]
         input_buffers["input_positions"][:num_positions].copy_(
             input_positions, non_blocking=True)
-    
+
     def begin_forward(self, model_input):
         assert not self._is_graph_capturing
         state = self
@@ -307,7 +307,6 @@ class FlashInferMLAMetadata(MLACommonMetadata):
     # Maximum sequence length among decode batch. 0 if there are prefill
     # requests only.
     max_decode_seq_len: int
-
 
     # Number of query tokens for each request in the batch.
     # Currently, we require that all requests have the same number of query
@@ -410,7 +409,7 @@ class FlashInferMLAMetadata(MLACommonMetadata):
                 q_data_type=self.q_data_type,
                 kv_data_type=self.data_type,
             )
-    
+
     def asdict_zerocopy(self,
                         skip_fields: Optional[Set[str]] = None
                         ) -> Dict[str, Any]:
@@ -508,15 +507,15 @@ class FlashInferMLAMetadata(MLACommonMetadata):
                                    block_tables=self.block_tables)
 
 
-
-class FlashInferMLAMetadataBuilder(AttentionMetadataBuilder[FlashInferMLAMetadata]):
+class FlashInferMLAMetadataBuilder(
+        AttentionMetadataBuilder[FlashInferMLAMetadata]):
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
         self.input_builder = input_builder
         self.runner = input_builder.runner
         self.sliding_window = input_builder.sliding_window
         self.block_size = input_builder.block_size
-    
+
     def prepare(self):
         self.slot_mapping: List[int] = []
         self.prefill_seq_lens: List[int] = []
@@ -550,7 +549,6 @@ class FlashInferMLAMetadataBuilder(AttentionMetadataBuilder[FlashInferMLAMetadat
         self.total_blocks = 0
         self.is_profile_run: bool = False
 
-    
     def _add_seq_group(
             self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
             chunked_prefill_enabled: bool, prefix_cache_hit: bool):
@@ -605,7 +603,7 @@ class FlashInferMLAMetadataBuilder(AttentionMetadataBuilder[FlashInferMLAMetadat
                     block_table = block_tables[seq_id][
                         -curr_sliding_window_block:]
             self.block_tables.append(block_table)
-            
+
             # Compute slot mapping.
             is_profile_run = is_block_tables_empty(block_tables)
             start_idx = compute_slot_mapping_start_idx(is_prompt, query_len,
@@ -614,7 +612,7 @@ class FlashInferMLAMetadataBuilder(AttentionMetadataBuilder[FlashInferMLAMetadat
             compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
                                  seq_len, context_len, start_idx,
                                  self.block_size, inter_data.block_tables)
-            
+
             # It is not necessary to add paged_kv_indices, paged_kv_indptr,
             # and paged_kv_last_page_len for profile run because we will
             # create dummy inputs.
@@ -666,8 +664,6 @@ class FlashInferMLAMetadataBuilder(AttentionMetadataBuilder[FlashInferMLAMetadat
             last_page_len = self.block_size
         self.paged_kv_last_page_len.append(last_page_len)
 
-
-    
     def build(self, seq_lens: List[int], query_lens: List[int],
               cuda_graph_pad_size: int, batch_size: int):
         """Build attention metadata with on-device tensors.
@@ -689,7 +685,7 @@ class FlashInferMLAMetadataBuilder(AttentionMetadataBuilder[FlashInferMLAMetadat
                                 prefix_cache_hit)
 
         device = self.runner.device
-        use_captured_graph = cuda_graph_pad_size != -1 
+        use_captured_graph = cuda_graph_pad_size != -1
 
         max_prefill_seq_len = max(self.prefill_seq_lens, default=0)
         max_decode_seq_len = max(self.curr_seq_lens, default=0)
@@ -718,15 +714,15 @@ class FlashInferMLAMetadataBuilder(AttentionMetadataBuilder[FlashInferMLAMetadat
                 dtype=torch.int,
                 device=device,
             )
-        
+
         assert device is not None
         seq_lens_tensor = async_tensor_h2d(seq_lens, torch.int, device,
                                            self.runner.pin_memory)
         input_positions = async_tensor_h2d(self.input_positions, torch.long,
                                            device, self.runner.pin_memory)
 
-        query_lens_tensor = async_tensor_h2d(query_lens_pad, torch.long, device,
-                                             self.runner.pin_memory)
+        query_lens_tensor = async_tensor_h2d(query_lens_pad, torch.long,
+                                             device, self.runner.pin_memory)
         slot_mapping_tensor = async_tensor_h2d(self.slot_mapping, torch.long,
                                                device, self.runner.pin_memory)
         query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
@@ -760,7 +756,7 @@ class FlashInferMLAMetadataBuilder(AttentionMetadataBuilder[FlashInferMLAMetadat
             block_table_bound_tensor = torch.zeros(len(self.paged_kv_indptr) -
                                                    1,
                                                    device="cpu",
-                                                   dtype=torch.int) 
+                                                   dtype=torch.int)
         else:
             paged_kv_indices_tensor = None
             paged_kv_indptr_tensor = None
@@ -776,7 +772,8 @@ class FlashInferMLAMetadataBuilder(AttentionMetadataBuilder[FlashInferMLAMetadat
 
         # TODO remove hard code
         assert self.runner.model_config.is_deepseek_mla
-        num_heads = self.runner.model_config.get_num_attention_heads(self.runner.parallel_config)
+        num_heads = self.runner.model_config.get_num_attention_heads(
+            self.runner.parallel_config)
         qk_nope_head_dim = self.runner.model_config.hf_text_config.qk_nope_head_dim
         qk_rope_head_dim = self.runner.model_config.hf_text_config.qk_rope_head_dim
         head_dim_ckv = self.runner.model_config.hf_text_config.kv_lora_rank
@@ -822,6 +819,7 @@ class FlashInferMLAMetadataBuilder(AttentionMetadataBuilder[FlashInferMLAMetadat
             sm_scale=sm_scale,
         )
 
+
 class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
 
     def __init__(
@@ -857,7 +855,7 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
                                       "TritonMLAImpl")
-    
+
     def _forward_prefill(
         self,
         q: torch.Tensor,
