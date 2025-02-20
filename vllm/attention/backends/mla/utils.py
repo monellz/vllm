@@ -19,6 +19,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase, RowParallelLinear,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.awq_marlin import AWQMarlinLinearMethod
+from vllm.attention.ops.triton_rope import deepseek_rope
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsLinearMethod)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
@@ -484,8 +485,15 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             else:
                 q_pe = torch.matmul(hidden_states_or_q_c, self.W_QR)\
                     .view(-1, self.num_heads, self.qk_rope_head_dim)
-            q_pe, k_pe = self.rotary_emb(attn_metadata.input_positions, q_pe,
-                                         k_pe)
+            # q_pe, k_pe = self.rotary_emb(attn_metadata.input_positions, q_pe,
+            #                              k_pe)
+            q_pe, k_pe = deepseek_rope(
+                attn_metadata.input_positions,
+                q_pe,
+                k_pe,
+                self.rotary_emb.cos_sin_cache.to(attn_metadata.input_positions.device),
+                self.qk_rope_head_dim,
+            )
         else:
             assert is_prefill
             q = self.q_proj(hidden_states_or_q_c)[0]\
