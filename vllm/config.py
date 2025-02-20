@@ -995,7 +995,7 @@ class ModelConfig:
             return False
 
         if self.quantization is not None and self.quantization not in [\
-            "fp8", "compressed-tensors"]:
+            "fp8", "compressed-tensors", "moe_wna16"]:
             logger.warning(
                 "MLA is not supported with %s quantization. "
                 "Disabling MLA.", self.quantization)

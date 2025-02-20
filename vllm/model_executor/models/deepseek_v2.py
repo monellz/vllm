@@ -384,6 +384,22 @@ class DeepseekV2MLAAttention(nn.Module):
                                                  bias=False,
                                                  quant_config=quant_config,
                                                  prefix=f"{prefix}.q_b_proj")
+
+            self.q_proj_and_k_up_proj = ColumnParallelLinear(
+                q_lora_rank,
+                self.num_heads * self.kv_lora_rank,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.q_proj_and_k_up_proj",
+            )
+            self.w_qr = ColumnParallelLinear(
+                q_lora_rank,
+                self.num_heads * self.qk_rope_head_dim,
+                bias=False,
+                # FIXME: acc_dtype must be torch.bfloat16
+                params_dtype=torch.bfloat16,
+                prefix=f"{prefix}.w_qr",
+            )
         else:
             self.q_proj = ColumnParallelLinear(self.hidden_size,
                                                self.num_heads *
@@ -406,6 +422,16 @@ class DeepseekV2MLAAttention(nn.Module):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.kv_b_proj")
+        
+        self.v_up_proj_and_o_proj = RowParallelLinear(
+            self.num_heads * self.kv_lora_rank,
+            self.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.v_up_proj_and_o_proj",
+        )
+
+
         self.o_proj = RowParallelLinear(self.num_heads * self.v_head_dim,
                                         self.hidden_size,
                                         bias=False,
@@ -446,6 +472,11 @@ class DeepseekV2MLAAttention(nn.Module):
             q_proj=self.q_proj if self.q_lora_rank is None else self.q_b_proj,
             kv_b_proj=self.kv_b_proj,
             o_proj=self.o_proj,
+
+            # dummy mla
+            q_proj_and_k_up_proj=self.q_proj_and_k_up_proj,
+            w_qr=self.w_qr,
+            v_up_proj_and_o_proj=self.v_up_proj_and_o_proj,
         )
 
         self.prefix = prefix

@@ -18,6 +18,7 @@ from vllm.distributed import (get_tensor_model_parallel_world_size,
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase, RowParallelLinear,
                                                UnquantizedLinearMethod)
+from vllm.model_executor.layers.quantization.awq_marlin import AWQMarlinLinearMethod
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsLinearMethod)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
@@ -161,6 +162,11 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         q_proj: ColumnParallelLinear,
         kv_b_proj: ColumnParallelLinear,
         o_proj: RowParallelLinear,
+
+        # dummy mla
+        q_proj_and_k_up_proj: ColumnParallelLinear = None,
+        w_qr: ColumnParallelLinear = None,
+        v_up_proj_and_o_proj: RowParallelLinear = None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -183,8 +189,16 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         self.o_proj = o_proj
         self.vllm_flash_attn_version = get_flash_attn_version()
 
+        self.q_proj_and_k_up_proj = q_proj_and_k_up_proj
+        self.w_qr = w_qr
+        self.v_up_proj_and_o_proj = v_up_proj_and_o_proj
+
     def _v_up_proj_and_o_proj(self, x):
         if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
+            if hasattr(self, "v_up_proj_and_o_proj"):
+                output = self.v_up_proj_and_o_proj(x.flatten(start_dim=1))[0]
+                return output
+
             if is_fp8(self.W_UV_O):
                 output_parallel = apply_fp8_linear_generic(
                     x.flatten(start_dim=1), self.W_UV_O, self.W_UV_O_scales,
@@ -205,7 +219,10 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
     def _q_proj_and_k_up_proj(self, x):
         if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
-            if is_fp8(self.W_Q_UK):
+            if hasattr(self, "q_proj_and_k_up_proj"):
+                return self.q_proj_and_k_up_proj(x)[0].view(
+                    -1, self.num_heads, self.kv_lora_rank)
+            elif is_fp8(self.W_Q_UK):
                 return apply_fp8_linear_generic(
                     x, self.W_Q_UK, self.W_Q_UK_scales,
                     self.reqaunt_input_group_shape,
@@ -295,6 +312,16 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         if not (quantization_scheme_supported(self.kv_b_proj) and\
             quantization_scheme_supported(self.q_proj) and\
                 quantization_scheme_supported(self.o_proj)):
+            
+            def is_awq(layer: LinearBase) -> bool:
+                return isinstance(layer.quant_method, AWQMarlinLinearMethod)
+            
+            # hardcode for dummy mla support
+            if is_awq(self.kv_b_proj) and is_awq(self.q_proj) and is_awq(self.o_proj):
+                print(f"Dummy MLA for awq!")
+                self.tp_size = get_tensor_model_parallel_world_size()
+                return
+
             raise NotImplementedError(
                 "Only FP8 and UnquantizedLinearMethod are supported for MLA"
                 ", please run with VLLM_MLA_DISABLE=1")
@@ -452,8 +479,11 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
         if is_decode:
             q_nope = self._q_proj_and_k_up_proj(hidden_states_or_q_c)
-            q_pe = torch.matmul(hidden_states_or_q_c, self.W_QR)\
-                .view(-1, self.num_heads, self.qk_rope_head_dim)
+            if self.w_qr is not None:
+                q_pe = self.w_qr(hidden_states_or_q_c)[0].view(-1, self.num_heads, self.qk_rope_head_dim)
+            else:
+                q_pe = torch.matmul(hidden_states_or_q_c, self.W_QR)\
+                    .view(-1, self.num_heads, self.qk_rope_head_dim)
             q_pe, k_pe = self.rotary_emb(attn_metadata.input_positions, q_pe,
                                          k_pe)
         else:
